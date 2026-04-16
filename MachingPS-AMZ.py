@@ -7,117 +7,115 @@ from thefuzz import process, fuzz
 
 st.set_page_config(page_title="Mapeador Pro PS-AMZ", layout="wide")
 
-# --- FUNCIONES DE PERSISTENCIA ---
-DB_FILE = "knowledge_base.json"
+# --- INICIALIZACIÓN DE ESTADOS ---
+if 'kb' not in st.session_state:
+    if os.path.exists("knowledge_base.json"):
+        with open("knowledge_base.json", "r", encoding="utf-8") as f:
+            st.session_state.kb = json.load(f)
+    else:
+        st.session_state.kb = {}
 
-def load_knowledge():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+if 'revisados' not in st.session_state:
+    st.session_state.revisados = set()
 
 def save_knowledge(mapping_dict):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
+    with open("knowledge_base.json", "w", encoding="utf-8") as f:
         json.dump(mapping_dict, f, ensure_ascii=False, indent=4)
 
-if 'kb' not in st.session_state:
-    st.session_state.kb = load_knowledge()
+st.title("🎯 Mapeador Pro de Categorías")
 
-st.title("🎯 Mapeador Inteligente de Categorías")
+# --- SIDEBAR: FILTROS Y DESCARGA ---
+st.sidebar.header("⚙️ Panel de Control")
 
-# --- SIDEBAR: FILTROS Y CONFIGURACIÓN ---
-st.sidebar.header("⚙️ Filtros de Vista")
-ver_estado = st.sidebar.radio("Ver categorías:", ["Todas", "Pendientes de revisar", "Confirmadas/Memoria"])
+ver_estado = st.sidebar.radio("Filtrar vista:", ["Todas", "Pendientes de revisar", "Confirmadas/Memoria"])
 min_score = st.sidebar.slider("Ocultar coincidencias superiores a (%):", 0, 100, 100)
+
 st.sidebar.divider()
-if st.sidebar.button("🗑️ Borrar toda la Memoria"):
-    if st.sidebar.checkbox("Confirmar borrado"):
-        st.session_state.kb = {}
-        save_knowledge({})
-        st.rerun()
 
 # --- 1. CARGA DE ARCHIVOS ---
 col_u1, col_u2 = st.columns(2)
 with col_u1:
-    file_ps = st.file_uploader("PrestaShop (.xlsx)", type=["xlsx"])
+    file_ps = st.file_uploader("📂 PrestaShop (.xlsx)", type=["xlsx"])
 with col_u2:
-    file_amz = st.file_uploader("Amazon (.xlsx)", type=["xlsx"])
+    file_amz = st.file_uploader("📂 Amazon (.xlsx)", type=["xlsx"])
 
 if file_ps and file_amz:
     df_ps = pd.read_excel(file_ps)
     df_amz = pd.read_excel(file_amz)
 
-    # Añadimos la opción de dejar en blanco
     cat_ps_list = ["[ Sin asignar ]"] + sorted(df_ps.iloc[:, 0].astype(str).unique().tolist())
     cat_amz_list = df_amz.iloc[:, 0].astype(str).unique().tolist()
 
     final_mapping = []
-    new_knowledge = st.session_state.kb.copy()
+    temp_kb = st.session_state.kb.copy()
 
-    st.write(f"### 📋 Procesando {len(cat_amz_list)} categorías de Amazon")
-    
-    # --- 2. LÓGICA Y RENDERIZADO ---
+    # --- 2. LÓGICA DE PROCESAMIENTO (Bucle principal) ---
+    filas_mostradas = 0
     for i, cat_amz in enumerate(cat_amz_list):
-        # Lógica de Matching
         if cat_amz in st.session_state.kb:
-            sugerencia = st.session_state.kb[cat_amz]
-            score = 100
-            metodo, color = "💾 Memoria", "blue"
+            sugerencia, score, metodo, color = st.session_state.kb[cat_amz], 100, "💾 Memoria", "blue"
             es_pendiente = False
         else:
-            # Buscamos en la lista original (sin el "Sin asignar")
             match, score = process.extractOne(cat_amz, cat_ps_list[1:], scorer=fuzz.token_sort_ratio)
-            sugerencia = match
-            metodo, color = f"🤖 IA ({score}%)", "green" if score > 85 else "orange"
-            es_pendiente = score < 90
+            sugerencia, metodo, color = match, f"🤖 IA ({score}%)", "green" if score > 85 else "orange"
+            es_pendiente = score < 95
 
-        # Aplicar Filtros de Interfaz
+        # Lógica de Filtrado Visual
         mostrar = True
+        if i in st.session_state.revisados and ver_estado == "Pendientes de revisar": 
+            mostrar = False
         if ver_estado == "Pendientes de revisar" and not es_pendiente: mostrar = False
         if ver_estado == "Confirmadas/Memoria" and es_pendiente: mostrar = False
         if score > min_score: mostrar = False
 
-        if mostrar:
-            with st.expander(f"📦 {cat_amz}", expanded=es_pendiente):
-                c1, c2 = st.columns([2, 1])
-                with c1:
-                    idx_default = cat_ps_list.index(sugerencia) if sugerencia in cat_ps_list else 0
-                    seleccion_final = st.selectbox(
-                        f"Mapear a PrestaShop:",
-                        options=cat_ps_list,
-                        index=idx_default,
-                        key=f"sel_{i}"
-                    )
-                with c2:
-                    st.markdown(f"**Origen:** Amazon")
-                    st.markdown(f"**Confianza:** :{color}[{metodo}]")
-                
-                new_knowledge[cat_amz] = seleccion_final
-                final_mapping.append({"ID": i + 1, "Categoría PrestaShop": seleccion_final, "Categoría Amazon": cat_amz})
-        else:
-            # Si no se muestra, igual lo añadimos al resultado final con su sugerencia
-            final_mapping.append({"ID": i + 1, "Categoría PrestaShop": sugerencia, "Categoría Amazon": cat_amz})
+        # Guardamos siempre el resultado actual para el Excel final
+        # Si el usuario ya cambió algo en el selectbox, se captura mediante st.session_state
+        current_selection = st.session_state.get(f"sel_{i}", sugerencia)
+        temp_kb[cat_amz] = current_selection
+        final_mapping.append({"ID": i + 1, "Categoría PrestaShop": current_selection, "Categoría Amazon": cat_amz})
 
-    # --- 3. EXPORTACIÓN ---
-    st.divider()
-    df_final = pd.DataFrame(final_mapping)
+        if mostrar:
+            filas_mostradas += 1
+            with st.expander(f"📦 {cat_amz}", expanded=es_pendiente):
+                c1, c2, c3 = st.columns([2, 1, 1])
+                with c1:
+                    idx_default = cat_ps_list.index(current_selection) if current_selection in cat_ps_list else 0
+                    st.selectbox(f"Mapear a:", options=cat_ps_list, index=idx_default, key=f"sel_{i}")
+                with c2:
+                    st.write(f"Estado: :{color}[{metodo}]")
+                with c3:
+                    if st.button("✅ Revisado", key=f"btn_{i}"):
+                        st.session_state.revisados.add(i)
+                        st.rerun()
+
+    if filas_mostradas == 0 and len(cat_amz_list) > 0:
+        st.success("🎉 ¡Todo revisado para este filtro!")
+
+    # --- 3. BOTÓN DE DESCARGA EN EL SIDEBAR ---
+    st.sidebar.subheader("📥 Exportar Resultados")
     
-    # Botón de descarga con limpieza de "Sin asignar" para el archivo final
+    df_final = pd.DataFrame(final_mapping)
+    # Limpiamos los "Sin asignar" para el Excel final
     df_export = df_final.copy()
     df_export["Categoría PrestaShop"] = df_export["Categoría PrestaShop"].replace("[ Sin asignar ]", "")
-    
+
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df_export.to_excel(writer, index=False, sheet_name='Mapeo_Final')
+        df_export.to_excel(writer, index=False, sheet_name='Mapeo')
     
-    st.download_button(
-        label="📥 Descargar Excel y Actualizar Memoria",
+    st.sidebar.download_button(
+        label="💾 Descargar Maestro Excel",
         data=buffer.getvalue(),
-        file_name="maestro_mapeado_limpio.xlsx",
+        file_name="maestro_mapeado.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         on_click=save_knowledge,
-        args=(new_knowledge,)
+        args=(temp_kb,),
+        use_container_width=True
     )
+    
+    if st.sidebar.button("🔄 Resetear Sesión", use_container_width=True):
+        st.session_state.revisados = set()
+        st.rerun()
 
 else:
-    st.info("Sube los archivos para comenzar la gestión de categorías.")
+    st.info("Sube los archivos Excel para activar las herramientas de mapeo.")
